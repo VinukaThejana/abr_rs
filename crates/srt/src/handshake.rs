@@ -1,7 +1,32 @@
 // https://github.com/Haivision/srt/blob/master/srtcore/handshake.h
 
-/// The handshake payload (Control Information Field) carried bt SRT control packets.
-/// This maps directly onto the wire format defiend in the SRT spec (Handshake CIF).
+use crate::{
+    SrtError,
+    wire::{BeReader, BeWriter},
+};
+
+/// Total serialized size of the handshake CIF in bytes, excluding any
+/// SRT extensions (HSREQ/HSRSP/KMREQ/KMRSP/SID) that may be appended
+/// after it during the CONCLUSION phase.
+///
+/// 8 x 4-byte fields (32 bytes) + 16-byte peer IP = 48 bytes. This
+/// matches `CHandShake::m_iContentSize` in the reference implementation.
+pub const HANDSHAKE_CIF_SIZE: usize = 48;
+
+/// Handshake type values expressed via their signed representation in
+/// the reference implementation (`UDTRequestType`), then cast to u32.
+/// This makes the mapping to the reference implementation structurally
+/// guaranteed rather than manually transcribed from hex — if you ever
+/// need to cross-check against `handshake.h` again, the `-3i32` etc.
+/// here read identically to `URQ_DONE = -3` there.
+const URQ_DONE: u32 = -3i32 as u32;
+const URQ_AGREEMENT: u32 = -2i32 as u32;
+const URQ_CONCLUSION: u32 = -1i32 as u32;
+const URQ_WAVEAHAND: u32 = 0i32 as u32;
+const URQ_INDUCTION: u32 = 1i32 as u32;
+
+/// The handshake payload (Control Information Field) carried by SRT control packets.
+/// This maps directly onto the wire format defined in the SRT spec (Handshake CIF).
 ///
 /// Total serialized size is 48 bytes excluding extensions.
 /// 4 byte fields + 16 byte peer IP.
@@ -66,35 +91,25 @@ pub struct Handshake {
 }
 
 /// The handshake type / phase, sent as raw u32 on the wire.
-///
-/// Reference implementation (`UDTRequestType` in handshake.h) uses signed
-/// `int32_t` values (e.g. `URQ_CONCLUSION = -1`), which are bit-identical
-/// to unsigned discriminants (`-1i32 as u32 == 0xFFFFFFFF`).
-/// u32 is used here because that's how the field is documented in the RFC.
 #[repr(u32)]
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Copy, Clone)]
 pub enum HandshakeType {
     /// Final step acknowledging the connection is fully established.
-    /// (== URQ_DONE / -3 in the reference implementation)
-    Done = 0xFFFFFFFD,
+    Done = URQ_DONE,
 
     /// Sent by the listener to accept a rendezvous handshake.
-    /// (== URQ_AGREEMENT / -2)
-    Agreement = 0xFFFFFFFE,
+    Agreement = URQ_AGREEMENT,
 
     /// Second phase of the handshake — sender and receiver agree on
-    /// final connection parameters and (optionally) exchange extensions.
-    /// (== URQ_CONCLUSION / -1)
-    Conclusion = 0xFFFFFFFF,
+    /// final connection parameters and (optionally) exchange SRT extensions
+    Conclusion = URQ_CONCLUSION,
 
     /// Used only in rendezvous (peer-to-peer) mode, not caller/listener.
-    /// (== URQ_WAVEAHAND / 0)
-    Waveahand = 0x00000000,
+    Waveahand = URQ_WAVEAHAND,
 
     /// First phase — caller asks the listener for a SYN cookie before
     /// any resources are allocated (mitigates handshake-flood DoS).
-    /// (== URQ_INDUCTION / 1)
-    Induction = 0x00000001,
+    Induction = URQ_INDUCTION,
 
     /// Any value we don't recognize. We keep the raw value around so we
     /// can still round-trip it (log it, echo it back, etc.) instead of
@@ -105,11 +120,11 @@ pub enum HandshakeType {
 impl From<u32> for HandshakeType {
     fn from(value: u32) -> Self {
         match value {
-            0xFFFFFFFD => HandshakeType::Done,
-            0xFFFFFFFE => HandshakeType::Agreement,
-            0xFFFFFFFF => HandshakeType::Conclusion,
-            0x00000000 => HandshakeType::Waveahand,
-            0x00000001 => HandshakeType::Induction,
+            URQ_DONE => HandshakeType::Done,
+            URQ_AGREEMENT => HandshakeType::Agreement,
+            URQ_CONCLUSION => HandshakeType::Conclusion,
+            URQ_WAVEAHAND => HandshakeType::Waveahand,
+            URQ_INDUCTION => HandshakeType::Induction,
             _ => HandshakeType::Unknown(value),
         }
     }
@@ -118,12 +133,281 @@ impl From<u32> for HandshakeType {
 impl From<HandshakeType> for u32 {
     fn from(value: HandshakeType) -> Self {
         match value {
-            HandshakeType::Done => 0xFFFFFFFD,
-            HandshakeType::Agreement => 0xFFFFFFFE,
-            HandshakeType::Conclusion => 0xFFFFFFFF,
-            HandshakeType::Waveahand => 0x00000000,
-            HandshakeType::Induction => 0x00000001,
+            HandshakeType::Done => URQ_DONE,
+            HandshakeType::Agreement => URQ_AGREEMENT,
+            HandshakeType::Conclusion => URQ_CONCLUSION,
+            HandshakeType::Waveahand => URQ_WAVEAHAND,
+            HandshakeType::Induction => URQ_INDUCTION,
             HandshakeType::Unknown(value) => value,
         }
+    }
+}
+
+impl Handshake {
+    /// Parses a `HANDSHAKE_CIF_SIZE` byte buffer into a `Handshake`
+    /// Only reads the base CIF, any trailing extensions are ignored and not parsed
+    /// and left for a seperate extension parser to handle.
+    pub fn parse(buffer: &[u8]) -> Result<Self, SrtError> {
+        let mut reader: BeReader = BeReader::new(buffer);
+
+        let version = reader.read_u32()?;
+        let encryption_field = reader.read_u16()?;
+        let extension_field = reader.read_u16()?;
+        let initial_sequence_number = reader.read_u32()?;
+        let max_transmission_unit = reader.read_u32()?;
+        let max_flow_window_size = reader.read_u32()?;
+        let handshake_type = HandshakeType::from(reader.read_u32()?);
+        let srt_socket_id = reader.read_u32()?;
+        let syn_cookie = reader.read_u32()?;
+        let peer_ip = reader.read_slice::<16>()?;
+
+        Ok(Handshake {
+            version,
+            encryption_field,
+            extension_field,
+            initial_sequence_number,
+            max_transmission_unit,
+            max_flow_window_size,
+            handshake_type,
+            srt_socket_id,
+            syn_cookie,
+            peer_ip,
+        })
+    }
+
+    /// Serializes the `Handshake` into a `HANDSHAKE_CIF_SIZE` byte buffer
+    /// Only serializes the base CIF, any trailing extensions are ignored and not serialized
+    pub fn to_bytes(&self) -> [u8; HANDSHAKE_CIF_SIZE] {
+        let mut buf = [0u8; HANDSHAKE_CIF_SIZE];
+        let mut writer: BeWriter = BeWriter::new(&mut buf);
+
+        writer.write_u32(self.version);
+        writer.write_u16(self.encryption_field);
+        writer.write_u16(self.extension_field);
+        writer.write_u32(self.initial_sequence_number);
+        writer.write_u32(self.max_transmission_unit);
+        writer.write_u32(self.max_flow_window_size);
+
+        let raw_type: u32 = self.handshake_type.into();
+        writer.write_u32(raw_type);
+
+        writer.write_u32(self.srt_socket_id);
+        writer.write_u32(self.syn_cookie);
+        writer.write_slice(&self.peer_ip);
+
+        buf
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_handshake() -> Handshake {
+        Handshake {
+            version: 5,
+            encryption_field: 0,
+            extension_field: 2,
+            initial_sequence_number: 0x1A2B_3C4D,
+            max_transmission_unit: 1500,
+            max_flow_window_size: 8192,
+            handshake_type: HandshakeType::Induction,
+            srt_socket_id: 0xAABB_CCDD,
+            syn_cookie: 0,
+            peer_ip: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 192, 168, 1, 42],
+        }
+    }
+
+    #[test]
+    fn handshake_type_done_round_trip() {
+        let raw: u32 = HandshakeType::Done.into();
+        assert_eq!(HandshakeType::from(raw), HandshakeType::Done);
+    }
+
+    #[test]
+    fn handshake_type_agreement_round_trip() {
+        let raw: u32 = HandshakeType::Agreement.into();
+        assert_eq!(HandshakeType::from(raw), HandshakeType::Agreement);
+    }
+
+    #[test]
+    fn handshake_type_conclusion_round_trip() {
+        let raw: u32 = HandshakeType::Conclusion.into();
+        assert_eq!(HandshakeType::from(raw), HandshakeType::Conclusion);
+    }
+
+    #[test]
+    fn handshake_type_waveahand_round_trip() {
+        let raw: u32 = HandshakeType::Waveahand.into();
+        assert_eq!(HandshakeType::from(raw), HandshakeType::Waveahand);
+    }
+
+    #[test]
+    fn handshake_type_induction_round_trip() {
+        let raw: u32 = HandshakeType::Induction.into();
+        assert_eq!(HandshakeType::from(raw), HandshakeType::Induction);
+    }
+
+    #[test]
+    fn handshake_type_unknown_preserves_value() {
+        let exotic = 0x42;
+        assert_eq!(HandshakeType::from(exotic), HandshakeType::Unknown(0x42));
+        let back: u32 = HandshakeType::Unknown(0x42).into();
+        assert_eq!(back, 0x42);
+    }
+
+    /// The reference implementation uses signed values; verify our
+    /// constants match the expected two's complement representations.
+    #[test]
+    fn handshake_type_wire_values() {
+        assert_eq!(u32::from(HandshakeType::Done), (-3i32 as u32));
+        assert_eq!(u32::from(HandshakeType::Agreement), (-2i32 as u32));
+        assert_eq!(u32::from(HandshakeType::Conclusion), (-1i32 as u32));
+        assert_eq!(u32::from(HandshakeType::Waveahand), 0);
+        assert_eq!(u32::from(HandshakeType::Induction), 1);
+    }
+
+    #[test]
+    fn round_trip_induction() {
+        let hs = sample_handshake();
+        let bytes = hs.to_bytes();
+        assert_eq!(bytes.len(), HANDSHAKE_CIF_SIZE);
+        let parsed = Handshake::parse(&bytes).unwrap();
+        assert_eq!(parsed, hs);
+    }
+
+    #[test]
+    fn round_trip_conclusion() {
+        let mut hs = sample_handshake();
+        hs.handshake_type = HandshakeType::Conclusion;
+        hs.extension_field = 0x0001 | 0x0002; // HSREQ + KMREQ
+        hs.syn_cookie = 0xDEAD_BEEF;
+        let parsed = Handshake::parse(&hs.to_bytes()).unwrap();
+        assert_eq!(parsed, hs);
+    }
+
+    #[test]
+    fn round_trip_done() {
+        let mut hs = sample_handshake();
+        hs.handshake_type = HandshakeType::Done;
+        hs.extension_field = 0;
+        let parsed = Handshake::parse(&hs.to_bytes()).unwrap();
+        assert_eq!(parsed, hs);
+    }
+
+    #[test]
+    fn round_trip_unknown_handshake_type() {
+        let mut hs = sample_handshake();
+        hs.handshake_type = HandshakeType::Unknown(0x1234_5678);
+        let parsed = Handshake::parse(&hs.to_bytes()).unwrap();
+        assert_eq!(parsed, hs);
+    }
+
+    #[test]
+    fn round_trip_ipv6_peer() {
+        let mut hs = sample_handshake();
+        // fe80::1
+        hs.peer_ip = [0xFE, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+        let parsed = Handshake::parse(&hs.to_bytes()).unwrap();
+        assert_eq!(parsed.peer_ip, hs.peer_ip);
+    }
+
+    #[test]
+    fn parse_too_short_returns_error() {
+        let short = [0u8; HANDSHAKE_CIF_SIZE - 1];
+        assert!(Handshake::parse(&short).is_err());
+    }
+
+    #[test]
+    fn parse_empty_buffer_returns_error() {
+        assert!(Handshake::parse(&[]).is_err());
+    }
+
+    #[test]
+    fn parse_ignores_trailing_extension_bytes() {
+        let hs = sample_handshake();
+        let base = hs.to_bytes();
+        // Append 20 fake extension bytes
+        let mut extended = Vec::from(base.as_slice());
+        extended.extend_from_slice(&[0xAB; 20]);
+        let parsed = Handshake::parse(&extended).unwrap();
+        assert_eq!(parsed, hs);
+    }
+
+    #[test]
+    fn to_bytes_matches_expected_layout() {
+        let hs = Handshake {
+            version: 4,
+            encryption_field: 0,
+            extension_field: 2,
+            initial_sequence_number: 0x0000_0001,
+            max_transmission_unit: 1500,
+            max_flow_window_size: 8192,
+            handshake_type: HandshakeType::Induction,
+            srt_socket_id: 1,
+            syn_cookie: 0,
+            peer_ip: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 127, 0, 0, 1],
+        };
+        let bytes = hs.to_bytes();
+
+        // version = 4
+        assert_eq!(&bytes[0..4], &4u32.to_be_bytes());
+        // encryption_field = 0, extension_field = 2
+        assert_eq!(&bytes[4..6], &0u16.to_be_bytes());
+        assert_eq!(&bytes[6..8], &2u16.to_be_bytes());
+        // initial_sequence_number = 1
+        assert_eq!(&bytes[8..12], &1u32.to_be_bytes());
+        // mtu = 1500
+        assert_eq!(&bytes[12..16], &1500u32.to_be_bytes());
+        // max_flow_window_size = 8192
+        assert_eq!(&bytes[16..20], &8192u32.to_be_bytes());
+        // handshake_type = Induction (1)
+        assert_eq!(&bytes[20..24], &1u32.to_be_bytes());
+        // srt_socket_id = 1
+        assert_eq!(&bytes[24..28], &1u32.to_be_bytes());
+        // syn_cookie = 0
+        assert_eq!(&bytes[28..32], &0u32.to_be_bytes());
+        // peer_ip = 127.0.0.1 mapped
+        assert_eq!(&bytes[32..48], &hs.peer_ip);
+    }
+
+    #[test]
+    fn round_trip_max_field_values() {
+        let hs = Handshake {
+            version: u32::MAX,
+            encryption_field: u16::MAX,
+            extension_field: u16::MAX,
+            initial_sequence_number: u32::MAX,
+            max_transmission_unit: u32::MAX,
+            max_flow_window_size: u32::MAX,
+            // u32::MAX == 0xFFFF_FFFF == -1i32 which is URQ_CONCLUSION,
+            // so From<u32> correctly maps it to Conclusion, not Unknown.
+            handshake_type: HandshakeType::Conclusion,
+            srt_socket_id: u32::MAX,
+            syn_cookie: u32::MAX,
+            peer_ip: [0xFF; 16],
+        };
+        let parsed = Handshake::parse(&hs.to_bytes()).unwrap();
+        assert_eq!(parsed, hs);
+    }
+
+    #[test]
+    fn round_trip_all_zeros() {
+        let hs = Handshake {
+            version: 0,
+            encryption_field: 0,
+            extension_field: 0,
+            initial_sequence_number: 0,
+            max_transmission_unit: 0,
+            max_flow_window_size: 0,
+            handshake_type: HandshakeType::Waveahand, // raw 0
+            srt_socket_id: 0,
+            syn_cookie: 0,
+            peer_ip: [0; 16],
+        };
+        let bytes = hs.to_bytes();
+        assert_eq!(bytes, [0u8; HANDSHAKE_CIF_SIZE]);
+        let parsed = Handshake::parse(&bytes).unwrap();
+        assert_eq!(parsed, hs);
     }
 }
