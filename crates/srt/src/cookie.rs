@@ -3,33 +3,26 @@ use std::hash::{Hash, Hasher};
 use std::net::SocketAddr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Cookie window in seconds. Cookies are valid for this duration after generation.
 const COOKIE_WINDOW_SECS: u64 = 60;
 
-/// Generates and verifies cookies for one server instance
 pub(crate) struct CookieGenerator {
     secret: u64,
 }
 
 impl CookieGenerator {
-    /// Creates a new `CookieGenerator` instance with a given secret
     pub(crate) fn with_secret(secret: u64) -> Self {
         Self { secret }
     }
 
-    /// Creates a new `CookieGenerator` instance with a random secret
     pub(crate) fn new() -> Self {
         Self::with_secret(rand::random())
     }
 
-    /// Generates a cookie for a given peer address. The cookie is valid for the current time window.
-    pub(crate) fn generate(&self, peer: SocketAddr) -> u32 {
+    pub(crate) fn generate_cookie(&self, peer: SocketAddr) -> u32 {
         self.cookie_for(peer, self.current_window())
     }
 
-    /// Checks whether a given `cookie` is a valid cookie for `peer` right now, or was it valid in
-    /// the immediately preceding time window
-    pub(crate) fn verify(&self, peer: SocketAddr, cookie: u32) -> bool {
+    pub(crate) fn verify_cookie(&self, peer: SocketAddr, cookie: u32) -> bool {
         let current_window = self.current_window();
         cookie == self.cookie_for(peer, current_window)
             || cookie == self.cookie_for(peer, current_window.wrapping_sub(1))
@@ -75,8 +68,8 @@ mod tests {
     #[test]
     fn generate_is_deterministic_for_same_peer() {
         let cg = CookieGenerator::with_secret(0xDEAD);
-        let a = cg.generate(peer_v4());
-        let b = cg.generate(peer_v4());
+        let a = cg.generate_cookie(peer_v4());
+        let b = cg.generate_cookie(peer_v4());
         assert_eq!(
             a, b,
             "same secret + same peer should produce the same cookie"
@@ -86,9 +79,9 @@ mod tests {
     #[test]
     fn verify_accepts_freshly_generated_cookie() {
         let cg = CookieGenerator::with_secret(42);
-        let cookie = cg.generate(peer_v4());
+        let cookie = cg.generate_cookie(peer_v4());
         assert!(
-            cg.verify(peer_v4(), cookie),
+            cg.verify_cookie(peer_v4(), cookie),
             "a cookie should verify immediately after generation"
         );
     }
@@ -100,7 +93,7 @@ mod tests {
         // Simulate a cookie that was generated one window ago
         let old_cookie = cg.cookie_for(peer_v4(), window.wrapping_sub(1));
         assert!(
-            cg.verify(peer_v4(), old_cookie),
+            cg.verify_cookie(peer_v4(), old_cookie),
             "cookie from the immediately preceding window should still verify"
         );
     }
@@ -110,7 +103,7 @@ mod tests {
         let cg = CookieGenerator::with_secret(42);
         // A random value is astronomically unlikely to collide with a valid cookie
         assert!(
-            !cg.verify(peer_v4(), 0x0000_0000),
+            !cg.verify_cookie(peer_v4(), 0x0000_0000),
             "an arbitrary zero cookie should not verify (unless astronomically unlucky)"
         );
     }
@@ -118,9 +111,9 @@ mod tests {
     #[test]
     fn verify_rejects_cookie_for_different_peer() {
         let cg = CookieGenerator::with_secret(42);
-        let cookie = cg.generate(peer_v4());
+        let cookie = cg.generate_cookie(peer_v4());
         assert!(
-            !cg.verify(peer_v4_other(), cookie),
+            !cg.verify_cookie(peer_v4_other(), cookie),
             "a cookie generated for one peer must not verify for a different peer"
         );
     }
@@ -132,7 +125,7 @@ mod tests {
         // Two windows ago — outside the accepted range (current and current-1)
         let expired_cookie = cg.cookie_for(peer_v4(), window.wrapping_sub(2));
         assert!(
-            !cg.verify(peer_v4(), expired_cookie),
+            !cg.verify_cookie(peer_v4(), expired_cookie),
             "cookie from two windows ago should be rejected"
         );
     }
@@ -140,8 +133,8 @@ mod tests {
     #[test]
     fn different_peers_produce_different_cookies() {
         let cg = CookieGenerator::with_secret(42);
-        let c1 = cg.generate(peer_v4());
-        let c2 = cg.generate(peer_v4_other());
+        let c1 = cg.generate_cookie(peer_v4());
+        let c2 = cg.generate_cookie(peer_v4_other());
         assert_ne!(c1, c2, "distinct peers should yield distinct cookies");
     }
 
@@ -149,8 +142,8 @@ mod tests {
     fn different_secrets_produce_different_cookies() {
         let g1 = CookieGenerator::with_secret(1);
         let g2 = CookieGenerator::with_secret(2);
-        let c1 = g1.generate(peer_v4());
-        let c2 = g2.generate(peer_v4());
+        let c1 = g1.generate_cookie(peer_v4());
+        let c2 = g2.generate_cookie(peer_v4());
         assert_ne!(
             c1, c2,
             "generators with different secrets should produce different cookies"
@@ -163,8 +156,8 @@ mod tests {
         let p1 = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, 42), 9000));
         let p2 = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, 42), 9001));
         assert_ne!(
-            cg.generate(p1),
-            cg.generate(p2),
+            cg.generate_cookie(p1),
+            cg.generate_cookie(p2),
             "same IP but different port should produce a different cookie"
         );
     }
@@ -172,15 +165,15 @@ mod tests {
     #[test]
     fn generate_and_verify_ipv6_peer() {
         let cg = CookieGenerator::with_secret(0xCAFE);
-        let cookie = cg.generate(peer_v6());
-        assert!(cg.verify(peer_v6(), cookie));
+        let cookie = cg.generate_cookie(peer_v6());
+        assert!(cg.verify_cookie(peer_v6(), cookie));
     }
 
     #[test]
     fn ipv4_and_ipv6_produce_different_cookies() {
         let cg = CookieGenerator::with_secret(42);
-        let c4 = cg.generate(peer_v4());
-        let c6 = cg.generate(peer_v6());
+        let c4 = cg.generate_cookie(peer_v4());
+        let c6 = cg.generate_cookie(peer_v6());
         assert_ne!(
             c4, c6,
             "IPv4 and IPv6 peers should produce different cookies"
@@ -191,9 +184,9 @@ mod tests {
     fn cookie_does_not_verify_across_generators() {
         let g1 = CookieGenerator::with_secret(1);
         let g2 = CookieGenerator::with_secret(2);
-        let cookie = g1.generate(peer_v4());
+        let cookie = g1.generate_cookie(peer_v4());
         assert!(
-            !g2.verify(peer_v4(), cookie),
+            !g2.verify_cookie(peer_v4(), cookie),
             "a cookie from one generator must not verify on another"
         );
     }
@@ -207,9 +200,9 @@ mod tests {
     #[test]
     fn new_produces_working_generator() {
         let cg = CookieGenerator::new();
-        let cookie = cg.generate(peer_v4());
+        let cookie = cg.generate_cookie(peer_v4());
         assert!(
-            cg.verify(peer_v4(), cookie),
+            cg.verify_cookie(peer_v4(), cookie),
             "generator from new() should produce verifiable cookies"
         );
     }
@@ -236,14 +229,14 @@ mod tests {
     #[test]
     fn zero_secret_still_functional() {
         let cg = CookieGenerator::with_secret(0);
-        let cookie = cg.generate(peer_v4());
-        assert!(cg.verify(peer_v4(), cookie));
+        let cookie = cg.generate_cookie(peer_v4());
+        assert!(cg.verify_cookie(peer_v4(), cookie));
     }
 
     #[test]
     fn max_secret_still_functional() {
         let cg = CookieGenerator::with_secret(u64::MAX);
-        let cookie = cg.generate(peer_v4());
-        assert!(cg.verify(peer_v4(), cookie));
+        let cookie = cg.generate_cookie(peer_v4());
+        assert!(cg.verify_cookie(peer_v4(), cookie));
     }
 }

@@ -56,7 +56,7 @@ impl HandshakeSession {
     ) -> HandshakeAction {
         match (self.state, incomming.handshake_type) {
             (ConnectionState::AwaitingInduction, HandshakeType::Induction) => {
-                let cookie = cookies.generate(self.peer_addr);
+                let cookie = cookies.generate_cookie(self.peer_addr);
                 self.state = ConnectionState::AwaitingConclusion;
 
                 HandshakeAction::Reply(self.build_reply(
@@ -67,7 +67,7 @@ impl HandshakeSession {
             }
 
             (ConnectionState::AwaitingConclusion, HandshakeType::Conclusion) => {
-                if cookies.verify(self.peer_addr, incomming.syn_cookie) {
+                if cookies.verify_cookie(self.peer_addr, incomming.syn_cookie) {
                     self.state = ConnectionState::Connected;
                     HandshakeAction::Established
                 } else {
@@ -76,7 +76,7 @@ impl HandshakeSession {
             }
 
             (ConnectionState::AwaitingConclusion, HandshakeType::Induction) => {
-                let cookie = cookies.generate(self.peer_addr);
+                let cookie = cookies.generate_cookie(self.peer_addr);
 
                 HandshakeAction::Reply(self.build_reply(
                     HandshakeType::Induction,
@@ -90,7 +90,7 @@ impl HandshakeSession {
     }
 
     fn build_reply(
-        &mut self,
+        &self,
         handshake_type: HandshakeType,
         cookie: u32,
         incomming: &Handshake,
@@ -141,7 +141,7 @@ mod tests {
     #[test]
     fn new_session_starts_in_awaiting_induction() {
         let s = session();
-        assert_eq!(s.state(), ConnectionState::AwaitingInduction);
+        assert_eq!(s.state, ConnectionState::AwaitingInduction);
         assert_eq!(s.local_socket_id(), 42);
     }
 

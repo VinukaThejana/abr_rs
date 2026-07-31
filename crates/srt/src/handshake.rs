@@ -1,4 +1,4 @@
-// https://github.com/Haivision/srt/blob/master/srtcore/handshake.h
+// Ref: https://github.com/Haivision/srt/blob/master/srtcore/handshake.h
 
 use crate::{
     SrtError,
@@ -144,9 +144,6 @@ impl From<HandshakeType> for u32 {
 }
 
 impl Handshake {
-    /// Parses a `HANDSHAKE_CIF_SIZE` byte buffer into a `Handshake`
-    /// Only reads the base CIF, any trailing extensions are ignored and not parsed
-    /// and left for a seperate extension parser to handle.
     pub fn parse(buffer: &[u8]) -> Result<Self, SrtError> {
         let mut reader: BeReader = BeReader::new(buffer);
 
@@ -175,8 +172,6 @@ impl Handshake {
         })
     }
 
-    /// Serializes the `Handshake` into a `HANDSHAKE_CIF_SIZE` byte buffer
-    /// Only serializes the base CIF, any trailing extensions are ignored and not serialized
     pub fn to_bytes(&self) -> [u8; HANDSHAKE_CIF_SIZE] {
         let mut buf = [0u8; HANDSHAKE_CIF_SIZE];
         let mut writer: BeWriter = BeWriter::new(&mut buf);
